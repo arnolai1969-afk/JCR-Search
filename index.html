@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JCR Journal Search Report</title>
+    
+    <!-- Polyfill for process.env -->
+    <script>
+        window.process = { env: { NODE_ENV: 'production' } };
+    </script>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        /* Print Styles Override */
+        @media print {
+            @page { size: landscape; margin: 10mm; }
+            body { -webkit-print-color-adjust: exact; background-color: white !important; }
+            .no-print { display: none !important; }
+            .print-visible { overflow: visible !important; height: auto !important; display: block !important; }
+            .virtual-container { position: static !important; height: auto !important; overflow: visible !important; }
+            .virtual-spacer { display: none !important; }
+            
+            .print-row {
+                page-break-inside: avoid;
+                padding-top: 15px !important;
+                padding-bottom: 15px !important;
+                display: flex !important;
+                align-items: flex-start !important;
+                border-bottom: 1px solid #ddd !important;
+            }
+            .print-row div { 
+                white-space: normal !important;
+                overflow: visible !important; 
+                text-overflow: clip !important;
+                line-height: 1.4 !important;
+                height: auto !important;
+            }
+        }
+    </style>
+</head>
+<body class="bg-[#f8f9fa] text-gray-800 font-sans select-none overflow-hidden h-screen">
+    <div id="root" class="h-full flex flex-col"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo, useEffect, useRef, useCallback } = React;
+        
+        // --- Inline Icons to avoid UMD/React version conflicts ---
+        const IconBase = ({ children, className, ...props }) => (
+            <svg 
+                xmlns="http://www.w3.org/2000/svg" 
+                width="24" 
+                height="24" 
+                viewBox="0 0 24 24" 
+                fill="none" 
+                stroke="currentColor" 
+                strokeWidth="2" 
+                strokeLinecap="round" 
+                strokeLinejoin="round" 
+                className={className} 
+                {...props}
+            >
+                {children}
+            </svg>
+        );
+
+        const Icons = {
+            Layers: (props) => <IconBase {...props}><polygon points="12 2 2 7 12 12 22 7 12 2" /><polyline points="2 17 12 22 22 17" /><polyline points="2 12 12 17 22 12" /></IconBase>,
+            CheckCircle: (props) => <IconBase {...props}><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></IconBase>,
+            Search: (props) => <IconBase {...props}><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></IconBase>,
+            RefreshCw: (props) => <IconBase {...props}><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /><path d="M8 16H3v5" /></IconBase>,
+            Loader: (props) => <IconBase {...props}><path d="M12 2v4" /><path d="m16.2 7.8 2.9-2.9" /><path d="M18 12h4" /><path d="m16.2 16.2 2.9 2.9" /><path d="M12 18v4" /><path d="m4.9 19.1 2.9-2.9" /><path d="M2 12h4" /><path d="m4.9 4.9 2.9 2.9" /></IconBase>,
+            Printer: (props) => <IconBase {...props}><polyline points="6 9 6 2 18 2 18 9" /><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" /><rect width="12" height="8" x="6" y="14" /></IconBase>,
+            AlertTriangle: (props) => <IconBase {...props}><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" /><path d="M12 9v4" /><path d="M12 17h.01" /></IconBase>,
+            Cloud: (props) => <IconBase {...props}><path d="M17.5 19c0-1.7-1.3-3-3-3h-1.1c-.1-2.9-2.4-5.2-5.3-5.2-2.6 0-4.8 1.9-5.2 4.4-.1-.1-.3-.1-.5-.1-2.5 0-4.5 2-4.5 4.5S2.5 24 5 24h12.5c2.5 0 4.5-2 4.5-4.5Z" /></IconBase>,
+            Upload: (props) => <IconBase {...props}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" x2="12" y1="3" y2="15" /></IconBase>,
+            Tag: (props) => <IconBase {...props}><path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94 .94-2.48 0-3.42L12 2Z" /><path d="M7 7h.01" /></IconBase>,
+            TrendingUp: (props) => <IconBase {...props}><polyline points="22 7 13.5 15.5 8.5 10.5 2 17" /><polyline points="16 7 22 7 22 13" /></IconBase>,
+            Trophy: (props) => <IconBase {...props}><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" /><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" /><path d="M4 22h16" /><path d="M10 14.66V17" /><path d="M14 14.66V17" /><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z" /></IconBase>
+        };
+
+        const { 
+            Layers, CheckCircle, Search, RefreshCw, Loader, Printer, 
+            AlertTriangle, Cloud, Upload, Tag, TrendingUp, Trophy 
+        } = Icons;
+
+        // ==========================================================================================
+        // [CLOUD LINK CONFIGURATION]
+        const JCR_URL = "https://www.dropbox.com/scl/fi/br17rls4408m3qmynif3g/JCR_Journal_Results_012026.xlsx?rlkey=rj1agb5sd8rzg34aipjgx51cf&st=49v1zgvm&dl=1";
+        // ==========================================================================================
+
+        const INITIAL_DATABASE = [];
+
+        // --- Web Worker Code (Embedded as String) ---
+        const workerCode = `
+        importScripts('https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js');
+
+        const sanitize = (str) => {
+            if (!str) return '';
+            return String(str)
+                .replace(/[\\u00A0\\u1680\\u180e\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]/g, ' ')
+                .replace(/\\s+/g, ' ')
+                .trim();
+        };
+
+        self.onmessage = function(e) {
+            const { type, payload } = e.data;
+            
+            if (type === 'PARSE_SINGLE_JCR') {
+                try {
+                    const { data } = payload;
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const sheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[sheetName];
+                    const rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                    
+                    let headerIdx = -1;
+                    let colMap = {};
+                    
+                    // Dynamic Header Detection
+                    for (let i = 0; i < Math.min(rawData.length, 20); i++) {
+                        const row = (rawData[i] || []).map(c => sanitize(c).toLowerCase());
+                        if (row.some(cell => cell.includes('journal name') || cell.includes('journal title') || cell === 'title')) {
+                            headerIdx = i;
+                            rawData[headerIdx].forEach((cell, cellIdx) => {
+                                const c = sanitize(cell).toLowerCase();
+                                
+                                if (c.includes('journal name') || c.includes('journal title') || c === 'title' || c === 'full journal title') {
+                                    colMap.title = cellIdx;
+                                }
+                                if (c === 'edition' || c.includes('edition')) {
+                                    colMap.edition = cellIdx;
+                                }
+                                if (c === 'issn') colMap.issn = cellIdx;
+                                if (c === 'eissn' || c.includes('e-issn')) colMap.eissn = cellIdx;
+                                if (c.includes('publisher') && !c.includes('city') && !c.includes('address')) {
+                                    colMap.publisher = cellIdx;
+                                }
+                                if (c.includes('web of science categories') || c === 'categories' || c === 'category') {
+                                    colMap.category = cellIdx;
+                                }
+                                // JIF
+                                if (c.includes('jif') && !c.includes('5 year') && !c.includes('quartile') && !c.includes('percentile') && !c.includes('rank')) {
+                                    colMap.jif = cellIdx;
+                                }
+                                // 5 Year JIF
+                                if (c.includes('5 year jif') && !c.includes('quartile') && !c.includes('percentile')) {
+                                    colMap.fiveYear = cellIdx;
+                                }
+                                // JIF Rank
+                                if (c.includes('jif rank')) {
+                                    colMap.jifRank = cellIdx;
+                                }
+                            });
+                            break;
+                        }
+                    }
+
+                    const allRows = [];
+                    let uniqueIdCounter = 0;
+
+                    if (headerIdx !== -1) {
+                        const rows = rawData.slice(headerIdx + 1);
+                        rows.forEach(r => {
+                            const getVal = (idx) => (idx !== undefined && r[idx] !== undefined) ? sanitize(r[idx]) : '-';
+                            const title = getVal(colMap.title);
+                            
+                            if (title && title !== '-') {
+                                let jifVal = getVal(colMap.jif);
+                                if (!jifVal || jifVal.toLowerCase() === 'n/a') jifVal = '-';
+                                if (jifVal !== '-' && !isNaN(parseFloat(jifVal))) {
+                                    jifVal = Math.round(parseFloat(jifVal) * 1000) / 1000;
+                                }
+
+                                let fiveYearVal = getVal(colMap.fiveYear);
+                                if (!fiveYearVal || fiveYearVal.toLowerCase() === 'n/a') fiveYearVal = '-';
+                                if (fiveYearVal !== '-' && !isNaN(parseFloat(fiveYearVal))) {
+                                    fiveYearVal = Math.round(parseFloat(fiveYearVal) * 1000) / 1000;
+                                }
+
+                                allRows.push({
+                                    id: \`jcr-\${uniqueIdCounter++}\`,
+                                    title: title,
+                                    source: getVal(colMap.edition),
+                                    issn: getVal(colMap.issn),
+                                    eissn: getVal(colMap.eissn),
+                                    publisher: getVal(colMap.publisher),
+                                    category: getVal(colMap.category),
+                                    jifRank: getVal(colMap.jifRank),
+                                    jif: jifVal,
+                                    fiveYear: fiveYearVal
+                                });
+                            }
+                        });
+                    }
+
+                    self.postMessage({ success: true, rows: allRows });
+                } catch (err) {
+                    self.postMessage({ success: false, error: err.message });
+                }
+            }
+        };
+        `;
+
+        const App = () => {
+            const [unifiedData, setUnifiedData] = useState(INITIAL_DATABASE);
+            const [displayData, setDisplayData] = useState(INITIAL_DATABASE);
+            const [inputValue, setInputValue] = useState('');
+            const [debouncedTerm, setDebouncedTerm] = useState(''); 
+            
+            const [isParsing, setIsParsing] = useState(false);
+            const [loadingStatus, setLoadingStatus] = useState('');
+            const [errorMsg, setErrorMsg] = useState(null);
+            
+            const [stats, setStats] = useState({ 
+                total: 0,
+                sciCount: 0,
+                ssciCount: 0,
+                dbVersion: '-',
+                source: 'INIT'
+            });
+            
+            const [isFileLoaded, setIsFileLoaded] = useState(false);
+            const [isPrinting, setIsPrinting] = useState(false);
+            
+            const workerRef = useRef(null);
+
+            const extractVersionFromUrl = (url) => {
+                try {
+                    const match = url.match(/_(\d{2})(\d{4})/);
+                    if (match) {
+                        return `${match[1]}/${match[2]}`;
+                    }
+                    return 'Unknown';
+                } catch {
+                    return 'Unknown';
+                }
+            };
+
+            useEffect(() => {
+                const version = extractVersionFromUrl(JCR_URL);
+                setStats(prev => ({ ...prev, dbVersion: version }));
+
+                const blob = new Blob([workerCode], { type: 'application/javascript' });
+                workerRef.current = new Worker(URL.createObjectURL(blob));
+
+                workerRef.current.onmessage = (e) => {
+                    const { success, rows, error } = e.data;
+                    if (success) {
+                        const sortedRows = rows.sort((a, b) => a.title.localeCompare(b.title));
+                        setUnifiedData(sortedRows);
+                        setDisplayData(sortedRows);
+                        
+                        const sci = sortedRows.filter(r => r.source && r.source.toUpperCase().includes('SCIE')).length;
+                        const ssci = sortedRows.filter(r => r.source && r.source.toUpperCase().includes('SSCI')).length;
+
+                        setStats(prev => ({
+                            ...prev,
+                            total: sortedRows.length,
+                            sciCount: sci,
+                            ssciCount: ssci
+                        }));
+                        
+                        setIsFileLoaded(true);
+                        setIsParsing(false);
+                        setLoadingStatus('');
+                    } else {
+                        console.error("Worker Error:", error);
+                        setErrorMsg({ text: "Parsing Failed", code: "WORKER_ERR" });
+                        setIsParsing(false);
+                    }
+                };
+
+                return () => {
+                    if (workerRef.current) workerRef.current.terminate();
+                };
+            }, []);
+
+            useEffect(() => {
+                const timer = setTimeout(() => {
+                    setDebouncedTerm(inputValue);
+                    if (!unifiedData || unifiedData.length === 0) return;
+
+                    if (!inputValue.trim()) {
+                        setDisplayData(unifiedData);
+                    } else {
+                        const query = inputValue.toLowerCase().trim();
+                        const filtered = unifiedData.filter(item => 
+                            (item.title && item.title.toLowerCase().includes(query))
+                        );
+                        setDisplayData(filtered);
+                    }
+                }, 300);
+
+                return () => clearTimeout(timer);
+            }, [inputValue, unifiedData]);
+
+            useEffect(() => {
+                if (!isFileLoaded) {
+                    handleJCRFetch();
+                }
+            }, []);
+
+            const convertToDirectLink = (url) => {
+                if (!url) return '';
+                let newUrl = url.replace('www.dropbox.com', 'dl.dropboxusercontent.com');
+                if (newUrl.includes('dl=0')) {
+                    newUrl = newUrl.replace('dl=0', 'dl=1');
+                }
+                return newUrl;
+            };
+
+            const handleJCRFetch = async () => {
+                setIsParsing(true);
+                setLoadingStatus('Loading JCR Database...');
+                setErrorMsg(null);
+                
+                try {
+                    const targetJCR = convertToDirectLink(JCR_URL);
+                    const resJCR = await fetch(targetJCR);
+
+                    if (!resJCR.ok) throw new Error(`JCR Download Failed: ${resJCR.status}`);
+
+                    const bufferJCR = await resJCR.arrayBuffer();
+                    
+                    setStats(prev => ({ ...prev, source: 'CLOUD_URL' }));
+                    
+                    if (workerRef.current) {
+                        workerRef.current.postMessage({ 
+                            type: 'PARSE_SINGLE_JCR', 
+                            payload: { data: new Uint8Array(bufferJCR) }
+                        });
+                    }
+
+                } catch (error) {
+                    console.warn("Fetch error:", error);
+                    let userText = error.message;
+                    if (error.message.includes("Failed to fetch") || error.name === 'TypeError') {
+                        userText = "Network Error: Blocked by CORS. (Connecting to dl.dropboxusercontent.com failed)";
+                    }
+                    setErrorMsg({ text: userText, code: "FETCH_ERR" });
+                    setIsParsing(false);
+                }
+            };
+
+            const handleFileUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                setIsParsing(true);
+                setLoadingStatus('Processing...');
+                setErrorMsg(null);
+                
+                const version = extractVersionFromUrl(file.name);
+                setStats(prev => ({ ...prev, dbVersion: version !== 'Unknown' ? version : prev.dbVersion, source: 'MANUAL_UPLOAD' }));
+
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    if (workerRef.current) {
+                        workerRef.current.postMessage({ 
+                            type: 'PARSE_SINGLE_JCR', 
+                            payload: { data: new Uint8Array(event.target.result) }
+                        });
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            };
+
+            const handlePrint = () => {
+                setIsPrinting(true);
+                setTimeout(() => {
+                    window.print();
+                    setIsPrinting(false);
+                }, 500);
+            };
+
+            return (
+                <div className="flex flex-col h-screen bg-[#f8f9fa] text-gray-800 font-sans select-none overflow-hidden print:h-auto print:overflow-visible print:bg-white">
+                    <header className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between shadow-sm shrink-0 gap-4 no-print">
+                        <div className="flex items-center gap-3 shrink-0">
+                            <div className="bg-indigo-700 p-2 rounded-lg">
+                                <Layers className="text-white w-5 h-5" />
+                            </div>
+                            <div>
+                                <h1 className="text-lg font-bold text-slate-900 tracking-tight">JCR Journal Search</h1>
+                                <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                                    <span className="flex items-center gap-1">
+                                        <CheckCircle className="w-3 h-3 text-emerald-600" /> 
+                                        {stats.source === 'CLOUD_URL' ? 'JCR Cloud Sync' : 'Local Mode'}
+                                    </span>
+                                    <span className="text-slate-300">|</span>
+                                    <span className="font-bold text-slate-700">SCIE: {stats.sciCount.toLocaleString()} / SSCI: {stats.ssciCount.toLocaleString()}</span>
+                                    <span className="text-slate-300">|</span>
+                                    <span className="font-bold text-slate-700">Database version: {stats.dbVersion}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="relative flex-grow">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                            <input
+                                type="text"
+                                placeholder={isFileLoaded ? "Search Journal Title (Instant Filter)..." : "Initializing database..."}
+                                className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded bg-white focus:ring-2 focus:ring-indigo-700 focus:border-indigo-700 outline-none text-sm transition-all shadow-sm font-medium"
+                                value={inputValue}
+                                onChange={(e) => setInputValue(e.target.value)}
+                                disabled={!isFileLoaded}
+                                autoFocus
+                            />
+                            {inputValue !== debouncedTerm && (
+                                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                                    <RefreshCw className="w-3 h-3 text-slate-400 animate-spin" />
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="flex items-center gap-3 shrink-0">
+                            {isFileLoaded && (
+                                <button 
+                                    onClick={handlePrint}
+                                    className="flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded font-bold hover:bg-slate-50 transition-all text-xs shadow-sm"
+                                >
+                                    {isPrinting ? <Loader className="w-4 h-4 animate-spin" /> : <Printer className="w-4 h-4" />} Print Report
+                                </button>
+                            )}
+                        </div>
+                    </header>
+
+                    <main className="flex-1 overflow-hidden bg-white p-0 relative print-visible">
+                        <div className="hidden print:block p-4 border-b-2 border-black mb-4">
+                            <h1 className="text-2xl font-bold">JCR Journal Search Report</h1>
+                            <div className="flex justify-between mt-2 text-sm">
+                                <span>Keywords: {inputValue || "(All Records)"}</span>
+                                <span>Total {displayData.length.toLocaleString()} records</span>
+                                <span>Database version: {stats.dbVersion}</span>
+                            </div>
+                        </div>
+
+                        {isParsing && (
+                            <div className="flex flex-col items-center justify-center h-full text-slate-500 bg-white/95 z-20 absolute inset-0 no-print">
+                                <RefreshCw className="w-12 h-12 mb-4 animate-spin text-indigo-600" />
+                                <p className="text-lg font-bold text-slate-700">{loadingStatus}</p>
+                            </div>
+                        )}
+
+                        {!isFileLoaded && !isParsing && (
+                            <div className="flex flex-col items-center justify-center h-full text-slate-400 bg-slate-50 no-print px-4">
+                                <div className="bg-white p-6 rounded-full shadow-sm mb-4">
+                                    {errorMsg ? <AlertTriangle className="w-12 h-12 text-amber-500" /> : <Cloud className="w-12 h-12 text-slate-300" />}
+                                </div>
+                                <h2 className="text-xl font-bold text-slate-700 mb-2">{errorMsg ? "Initialization Failed" : "Waiting for Database..."}</h2>
+                                <p className="text-sm text-slate-500 max-w-md text-center leading-relaxed mb-6">{errorMsg ? errorMsg.text : "Please check your connection."}</p>
+                                <div className="relative overflow-hidden group">
+                                    <input type="file" accept=".csv, .xlsx" onChange={handleFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
+                                    <button className="flex items-center justify-center gap-2 w-full px-6 py-3 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 transition-colors shadow-md font-bold">
+                                        <Upload className="w-4 h-4" /> Manual Upload
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {isFileLoaded && (
+                            <VirtualTable 
+                                data={displayData} 
+                                totalCount={stats.total}
+                                isPrinting={isPrinting} 
+                                inputValue={inputValue}
+                                dbVersion={stats.dbVersion}
+                            />
+                        )}
+                    </main>
+                </div>
+            );
+        };
+
+        const VirtualTable = ({ data, totalCount, isPrinting, inputValue, dbVersion }) => {
+            const parentRef = useRef();
+            const [scrollTop, setScrollTop] = useState(0);
+            const [containerHeight, setContainerHeight] = useState(800);
+
+            const rowHeight = 80; 
+            const totalHeight = data.length * rowHeight;
+
+            useEffect(() => {
+                if (parentRef.current) {
+                    setContainerHeight(parentRef.current.clientHeight);
+                    const handleScroll = (e) => setScrollTop(e.target.scrollTop);
+                    const parent = parentRef.current;
+                    parent.addEventListener('scroll', handleScroll);
+                    return () => parent.removeEventListener('scroll', handleScroll);
+                }
+            }, []);
+
+            let visibleData = data;
+            let startSpacerHeight= 0;
+            
+            if (!isPrinting && data.length > 100) {
+                const startIndex = Math.floor(scrollTop / rowHeight);
+                const visibleNodeCount = Math.ceil(containerHeight / rowHeight);
+                const start = Math.max(0, startIndex - 5);
+                const end = Math.min(data.length, startIndex + visibleNodeCount + 5);
+                
+                visibleData = data.slice(start, end);
+                startSpacerHeight = start * rowHeight;
+            }
+
+            return (
+                <div className="flex flex-col h-full print:h-auto">
+                    <div className="bg-slate-100 border-b border-slate-300 flex text-[11px] font-bold text-slate-700 uppercase tracking-wider shadow-sm shrink-0 print:border-black print:text-black">
+                        <div className="px-3 py-3 w-[6%] border-r border-slate-200 text-center">DB</div>
+                        <div className="px-4 py-3 w-[22%] border-r border-slate-200">Journal Title</div>
+                        <div className="px-4 py-3 w-[17%] border-r border-slate-200">Category</div>
+                        <div className="px-3 py-3 w-[8%] border-r border-slate-200 text-center">ISSN</div>
+                        <div className="px-3 py-3 w-[8%] border-r border-slate-200 text-center">E-ISSN</div>
+                        <div className="px-4 py-3 w-[14%] border-r border-slate-200">Publisher</div>
+                        <div className="px-3 py-3 w-[8%] border-r border-slate-200 text-center">JIF</div>
+                        <div className="px-3 py-3 w-[8%] border-r border-slate-200 text-center" title="5 Year Journal Impact Factor">5 year JIF</div>
+                        <div className="px-3 py-3 w-[9%] text-center">JIF Rank</div>
+                    </div>
+
+                    <div ref={parentRef} className="flex-1 overflow-y-auto print:overflow-visible virtual-container">
+                        <div style={{ height: isPrinting ? 'auto' : totalHeight, position: 'relative' }}>
+                            <div className="virtual-spacer" style={{ height: isPrinting ? 0 : startSpacerHeight }} />
+                            
+                            {visibleData.length > 0 ? (
+                                visibleData.map((item) => (
+                                    <div 
+                                        key={item.id} 
+                                        className="flex text-sm hover:bg-indigo-50 transition-colors group border-b border-slate-100 print-row print:border-slate-300 print:text-xs items-start py-2"
+                                        style={{ height: isPrinting ? 'auto' : 'auto', minHeight: isPrinting ? 0 : rowHeight }} 
+                                    >
+                                        <div className="px-3 w-[6%] flex justify-center pt-1 border-r border-transparent group-hover:border-slate-200 print:border-r print:border-slate-300">
+                                            <span className={`px-2 py-1 rounded text-[10px] font-bold ${
+                                                item.source && item.source.includes('SCIE')
+                                                ? 'bg-blue-100 text-blue-800 border border-blue-200' 
+                                                : item.source && item.source.includes('SSCI')
+                                                    ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                                                    : 'bg-gray-100 text-gray-800'
+                                            }`}>
+                                                {item.source || '-'}
+                                            </span>
+                                        </div>
+
+                                        <div className="px-4 w-[22%] text-slate-700 leading-snug whitespace-normal break-words border-r border-transparent group-hover:border-slate-200 print:border-r print:border-slate-300 font-medium" title={item.title}>
+                                            {item.title}
+                                        </div>
+                                        
+                                        <div className="px-4 w-[17%] text-slate-600 text-[12px] leading-snug whitespace-normal break-words border-r border-transparent group-hover:border-slate-200 print:text-black print:border-r print:border-slate-300 flex items-start gap-1">
+                                            {item.category && <Tag className="w-3 h-3 text-slate-400 mt-0.5 shrink-0 hidden group-hover:block" />}
+                                            {item.category || '-'}
+                                        </div>
+
+                                        <div className="px-3 w-[8%] font-mono text-slate-500 text-[13px] text-center leading-snug border-r border-transparent group-hover:border-slate-200 print:text-black print:border-r print:border-slate-300">
+                                            {item.issn}
+                                        </div>
+                                        <div className="px-3 w-[8%] font-mono text-slate-500 text-[13px] text-center leading-snug border-r border-transparent group-hover:border-slate-200 print:text-black print:border-r print:border-slate-300">
+                                            {item.eissn}
+                                        </div>
+                                        <div className="px-4 w-[14%] text-slate-600 text-[13px] leading-snug whitespace-normal break-words border-r border-transparent group-hover:border-slate-200 print:text-black print:border-r print:border-slate-300">
+                                            {item.publisher}
+                                        </div>
+                                        
+                                        <div className="px-3 w-[8%] font-mono text-indigo-700 text-[13px] text-center leading-snug border-r border-transparent group-hover:border-slate-200 print:text-black print:border-r print:border-slate-300 font-bold">
+                                            {item.jif !== '-' && <TrendingUp className="w-3 h-3 inline-block mr-1 text-slate-300" />}
+                                            {item.jif}
+                                        </div>
+                                        
+                                        <div className="px-3 w-[8%] font-mono text-emerald-700 text-[13px] text-center leading-snug border-r border-transparent group-hover:border-slate-200 print:text-black print:border-r print:border-slate-300 font-bold">
+                                            {item.fiveYear}
+                                        </div>
+
+                                        <div className="px-3 w-[9%] text-[12px] text-slate-600 leading-snug print:text-black text-center flex justify-center items-start gap-1">
+                                            {item.jifRank !== '-' && <Trophy className="w-3 h-3 text-amber-400 shrink-0 mt-0.5" />}
+                                            {item.jifRank}
+                                        </div>
+                                    </div>
+                                ))
+                            ) : (
+                                <div className="py-20 text-center absolute w-full top-0">
+                                    <p className="text-slate-500 text-sm font-medium">No journals found matching "{inputValue}".</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    
+                    <div className="bg-slate-50 text-slate-400 text-[10px] py-2 px-6 border-t border-slate-200 text-center shrink-0 print:hidden">
+                        Total {data.length.toLocaleString()} records displayed (from {totalCount.toLocaleString()} total entries). Database version: {dbVersion}
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
