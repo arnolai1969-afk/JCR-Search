@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>JCR Journal Search Report</title>
     
     <!-- Polyfill for process.env -->
@@ -54,7 +54,7 @@
     <script type="text/babel">
         const { useState, useMemo, useEffect, useRef, useCallback } = React;
         
-        // --- Inline Icons to avoid UMD/React version conflicts ---
+        // --- Inline Icons ---
         const IconBase = ({ children, className, ...props }) => (
             <svg 
                 xmlns="http://www.w3.org/2000/svg" 
@@ -94,13 +94,14 @@
         } = Icons;
 
         // ==========================================================================================
-        // [CLOUD LINK CONFIGURATION]
-        const JCR_URL = "https://www.dropbox.com/scl/fi/br17rls4408m3qmynif3g/JCR_Journal_Results_012026.xlsx?rlkey=rj1agb5sd8rzg34aipjgx51cf&st=49v1zgvm&dl=1";
+        // [LOCAL FILE CONFIGURATION]
+        // Explicitly hardcoded to the specific file.
+        const TARGET_FILE = "JCR_Journal_Results_012026.xlsx";
         // ==========================================================================================
 
         const INITIAL_DATABASE = [];
 
-        // --- Web Worker Code (Embedded as String) ---
+        // --- Web Worker Code ---
         const workerCode = `
         importScripts('https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js');
 
@@ -235,19 +236,13 @@
             const workerRef = useRef(null);
 
             const extractVersionFromUrl = (url) => {
-                try {
-                    const match = url.match(/_(\d{2})(\d{4})/);
-                    if (match) {
-                        return `${match[1]}/${match[2]}`;
-                    }
-                    return 'Unknown';
-                } catch {
-                    return 'Unknown';
-                }
+                const match = url.match(/_(\d{2})(\d{4})/);
+                if (match) return `${match[1]}/${match[2]}`;
+                return 'Unknown';
             };
 
             useEffect(() => {
-                const version = extractVersionFromUrl(JCR_URL);
+                const version = extractVersionFromUrl(TARGET_FILE);
                 setStats(prev => ({ ...prev, dbVersion: version }));
 
                 const blob = new Blob([workerCode], { type: 'application/javascript' });
@@ -306,48 +301,61 @@
 
             useEffect(() => {
                 if (!isFileLoaded) {
-                    handleJCRFetch();
+                    loadTargetFile();
                 }
             }, []);
 
-            const convertToDirectLink = (url) => {
-                if (!url) return '';
-                let newUrl = url.replace('www.dropbox.com', 'dl.dropboxusercontent.com');
-                if (newUrl.includes('dl=0')) {
-                    newUrl = newUrl.replace('dl=0', 'dl=1');
+            // === Direct File Loading with Cache Busting ===
+            const loadTargetFile = async () => {
+                // Check if running in local file mode (file:// protocol)
+                if (window.location.protocol === 'file:') {
+                    setLoadingStatus('');
+                    setErrorMsg({ 
+                        text: "Local Mode Detected: Please use the 'Manual Upload' button to load the file due to browser security restrictions.", 
+                        code: "LOCAL_MODE_RESTRICTION" 
+                    });
+                    return;
                 }
-                return newUrl;
-            };
 
-            const handleJCRFetch = async () => {
                 setIsParsing(true);
-                setLoadingStatus('Loading JCR Database...');
+                setLoadingStatus('Downloading database file...');
                 setErrorMsg(null);
-                
+
                 try {
-                    const targetJCR = convertToDirectLink(JCR_URL);
-                    const resJCR = await fetch(targetJCR);
-
-                    if (!resJCR.ok) throw new Error(`JCR Download Failed: ${resJCR.status}`);
-
-                    const bufferJCR = await resJCR.arrayBuffer();
+                    // Cache Busting: Add timestamp to force new fetch
+                    const cacheBuster = `?t=${new Date().getTime()}`;
+                    const fileUrl = `./${TARGET_FILE}${cacheBuster}`;
                     
-                    setStats(prev => ({ ...prev, source: 'CLOUD_URL' }));
+                    const response = await fetch(fileUrl);
+                    
+                    if (!response.ok) {
+                        if (response.status === 404) {
+                            throw new Error(`File '${TARGET_FILE}' not found in the same directory.`);
+                        }
+                        throw new Error(`Download Failed: ${response.status}`);
+                    }
+
+                    const buffer = await response.arrayBuffer();
+                    
+                    setStats(prev => ({ 
+                        ...prev, 
+                        source: 'LOCAL_FILE', 
+                    }));
                     
                     if (workerRef.current) {
                         workerRef.current.postMessage({ 
                             type: 'PARSE_SINGLE_JCR', 
-                            payload: { data: new Uint8Array(bufferJCR) }
+                            payload: { data: new Uint8Array(buffer) }
                         });
                     }
 
                 } catch (error) {
-                    console.warn("Fetch error:", error);
-                    let userText = error.message;
-                    if (error.message.includes("Failed to fetch") || error.name === 'TypeError') {
-                        userText = "Network Error: Blocked by CORS. (Connecting to dl.dropboxusercontent.com failed)";
+                    console.warn("Load error:", error);
+                    let userMsg = error.message;
+                    if (userMsg.includes("Failed to fetch") || userMsg.includes("NetworkError")) {
+                        userMsg = "Network Error. Please ensure the file exists and GitHub Pages is deployed correctly.";
                     }
-                    setErrorMsg({ text: userText, code: "FETCH_ERR" });
+                    setErrorMsg({ text: userMsg, code: "FILE_NOT_FOUND" });
                     setIsParsing(false);
                 }
             };
@@ -360,8 +368,13 @@
                 setLoadingStatus('Processing...');
                 setErrorMsg(null);
                 
-                const version = extractVersionFromUrl(file.name);
-                setStats(prev => ({ ...prev, dbVersion: version !== 'Unknown' ? version : prev.dbVersion, source: 'MANUAL_UPLOAD' }));
+                let version = 'Uploaded';
+                try {
+                    const match = file.name.match(/_(\d{2})(\d{4})/);
+                    if (match) version = `${match[1]}/${match[2]}`;
+                } catch {}
+
+                setStats(prev => ({ ...prev, dbVersion: version, source: 'MANUAL_UPLOAD' }));
 
                 const reader = new FileReader();
                 reader.onload = (event) => {
@@ -395,12 +408,12 @@
                                 <div className="flex items-center gap-2 text-[10px] text-slate-500">
                                     <span className="flex items-center gap-1">
                                         <CheckCircle className="w-3 h-3 text-emerald-600" /> 
-                                        {stats.source === 'CLOUD_URL' ? 'JCR Cloud Sync' : 'Local Mode'}
+                                        {stats.source === 'LOCAL_FILE' ? 'GitHub Hosted Data' : 'Local Mode'}
                                     </span>
                                     <span className="text-slate-300">|</span>
                                     <span className="font-bold text-slate-700">SCIE: {stats.sciCount.toLocaleString()} / SSCI: {stats.ssciCount.toLocaleString()}</span>
                                     <span className="text-slate-300">|</span>
-                                    <span className="font-bold text-slate-700">Database version: {stats.dbVersion}</span>
+                                    <span className="font-bold text-slate-700">Database version: {stats.dbVersion} (v4.0)</span>
                                 </div>
                             </div>
                         </div>
@@ -457,8 +470,8 @@
                                 <div className="bg-white p-6 rounded-full shadow-sm mb-4">
                                     {errorMsg ? <AlertTriangle className="w-12 h-12 text-amber-500" /> : <Cloud className="w-12 h-12 text-slate-300" />}
                                 </div>
-                                <h2 className="text-xl font-bold text-slate-700 mb-2">{errorMsg ? "Initialization Failed" : "Waiting for Database..."}</h2>
-                                <p className="text-sm text-slate-500 max-w-md text-center leading-relaxed mb-6">{errorMsg ? errorMsg.text : "Please check your connection."}</p>
+                                <h2 className="text-xl font-bold text-slate-700 mb-2">{errorMsg ? "Data Load Failed" : "Waiting for Database..."}</h2>
+                                <p className="text-sm text-slate-500 max-w-md text-center leading-relaxed mb-6">{errorMsg ? errorMsg.text : `Please ensure '${TARGET_FILE}' is in the same folder.`}</p>
                                 <div className="relative overflow-hidden group">
                                     <input type="file" accept=".csv, .xlsx" onChange={handleFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
                                     <button className="flex items-center justify-center gap-2 w-full px-6 py-3 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 transition-colors shadow-md font-bold">
