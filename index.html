@@ -97,13 +97,12 @@
 
         // ==========================================================================================
         // [LOCAL FILE CONFIGURATION]
-        // Explicitly hardcoded to the specific file.
         const TARGET_FILE = "JCR_Journal_Results_012026.xlsx";
         // ==========================================================================================
 
         const INITIAL_DATABASE = [];
 
-        // --- Web Worker Code ---
+        // --- Web Worker Code (Optimized for Mobile OOM) ---
         const workerCode = `
         importScripts('https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js');
 
@@ -115,6 +114,10 @@
                 .trim();
         };
 
+        // GLOBAL STORE IN WORKER (Prevents Main Thread OOM)
+        let globalAllRows = [];
+        let globalStats = { sciCount: 0, ssciCount: 0 };
+
         self.onmessage = function(e) {
             const { type, payload } = e.data;
             
@@ -122,6 +125,9 @@
                 try {
                     const { data } = payload;
                     const workbook = XLSX.read(data, { type: 'array' });
+                    // Free memory immediately
+                    payload.data = null; 
+                    
                     const sheetName = workbook.SheetNames[0];
                     const worksheet = workbook.Sheets[sheetName];
                     const rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
@@ -136,39 +142,22 @@
                             headerIdx = i;
                             rawData[headerIdx].forEach((cell, cellIdx) => {
                                 const c = sanitize(cell).toLowerCase();
-                                
-                                if (c.includes('journal name') || c.includes('journal title') || c === 'title' || c === 'full journal title') {
-                                    colMap.title = cellIdx;
-                                }
-                                if (c === 'edition' || c.includes('edition')) {
-                                    colMap.edition = cellIdx;
-                                }
+                                if (c.includes('journal name') || c.includes('journal title') || c === 'title' || c === 'full journal title') colMap.title = cellIdx;
+                                if (c === 'edition' || c.includes('edition')) colMap.edition = cellIdx;
                                 if (c === 'issn') colMap.issn = cellIdx;
                                 if (c === 'eissn' || c.includes('e-issn')) colMap.eissn = cellIdx;
-                                if (c.includes('publisher') && !c.includes('city') && !c.includes('address')) {
-                                    colMap.publisher = cellIdx;
-                                }
-                                if (c.includes('web of science categories') || c === 'categories' || c === 'category') {
-                                    colMap.category = cellIdx;
-                                }
-                                // JIF
-                                if (c.includes('jif') && !c.includes('5 year') && !c.includes('quartile') && !c.includes('percentile') && !c.includes('rank')) {
-                                    colMap.jif = cellIdx;
-                                }
-                                // 5 Year JIF
-                                if (c.includes('5 year jif') && !c.includes('quartile') && !c.includes('percentile')) {
-                                    colMap.fiveYear = cellIdx;
-                                }
-                                // JIF Rank
-                                if (c.includes('jif rank')) {
-                                    colMap.jifRank = cellIdx;
-                                }
+                                if (c.includes('publisher') && !c.includes('city') && !c.includes('address')) colMap.publisher = cellIdx;
+                                if (c.includes('web of science categories') || c === 'categories' || c === 'category') colMap.category = cellIdx;
+                                if (c.includes('jif') && !c.includes('5 year') && !c.includes('quartile') && !c.includes('percentile') && !c.includes('rank')) colMap.jif = cellIdx;
+                                if (c.includes('5 year jif') && !c.includes('quartile') && !c.includes('percentile')) colMap.fiveYear = cellIdx;
+                                if (c.includes('jif rank')) colMap.jifRank = cellIdx;
                             });
                             break;
                         }
                     }
 
-                    const allRows = [];
+                    globalAllRows = [];
+                    globalStats = { sciCount: 0, ssciCount: 0 };
                     let uniqueIdCounter = 0;
 
                     if (headerIdx !== -1) {
@@ -180,20 +169,20 @@
                             if (title && title !== '-') {
                                 let jifVal = getVal(colMap.jif);
                                 if (!jifVal || jifVal.toLowerCase() === 'n/a') jifVal = '-';
-                                if (jifVal !== '-' && !isNaN(parseFloat(jifVal))) {
-                                    jifVal = Math.round(parseFloat(jifVal) * 1000) / 1000;
-                                }
+                                if (jifVal !== '-' && !isNaN(parseFloat(jifVal))) jifVal = Math.round(parseFloat(jifVal) * 1000) / 1000;
 
                                 let fiveYearVal = getVal(colMap.fiveYear);
                                 if (!fiveYearVal || fiveYearVal.toLowerCase() === 'n/a') fiveYearVal = '-';
-                                if (fiveYearVal !== '-' && !isNaN(parseFloat(fiveYearVal))) {
-                                    fiveYearVal = Math.round(parseFloat(fiveYearVal) * 1000) / 1000;
-                                }
+                                if (fiveYearVal !== '-' && !isNaN(parseFloat(fiveYearVal))) fiveYearVal = Math.round(parseFloat(fiveYearVal) * 1000) / 1000;
 
-                                allRows.push({
+                                const source = getVal(colMap.edition);
+                                if (source && source.includes('SCIE')) globalStats.sciCount++;
+                                if (source && source.includes('SSCI')) globalStats.ssciCount++;
+
+                                globalAllRows.push({
                                     id: \`jcr-\${uniqueIdCounter++}\`,
                                     title: title,
-                                    source: getVal(colMap.edition),
+                                    source: source,
                                     issn: getVal(colMap.issn),
                                     eissn: getVal(colMap.eissn),
                                     publisher: getVal(colMap.publisher),
@@ -205,17 +194,52 @@
                             }
                         });
                     }
+                    
+                    // Sort initially by Title
+                    globalAllRows.sort((a, b) => a.title.localeCompare(b.title));
 
-                    self.postMessage({ success: true, rows: allRows });
+                    // Send READY signal (DO NOT send rows yet to save memory)
+                    self.postMessage({ 
+                        success: true, 
+                        type: 'READY',
+                        stats: {
+                            total: globalAllRows.length,
+                            ...globalStats
+                        }
+                    });
+
                 } catch (err) {
                     self.postMessage({ success: false, error: err.message });
                 }
+            }
+            
+            // Handle Search on Worker Thread
+            if (type === 'SEARCH') {
+                const { query } = payload;
+                let results = globalAllRows;
+                
+                if (query && query.trim()) {
+                    const q = query.toLowerCase().trim();
+                    results = globalAllRows.filter(item => 
+                        (item.title && item.title.toLowerCase().includes(q))
+                    );
+                }
+                
+                // Limit results to avoid Main Thread OOM when rendering
+                // 2000 is generous for a user to scroll, but safe for iOS DOM
+                const limitedResults = results.slice(0, 2000);
+                
+                self.postMessage({ 
+                    success: true, 
+                    type: 'SEARCH_RESULTS',
+                    rows: limitedResults,
+                    totalMatch: results.length
+                });
             }
         };
         `;
 
         const App = () => {
-            const [unifiedData, setUnifiedData] = useState(INITIAL_DATABASE);
             const [displayData, setDisplayData] = useState(INITIAL_DATABASE);
             const [inputValue, setInputValue] = useState('');
             const [debouncedTerm, setDebouncedTerm] = useState(''); 
@@ -229,7 +253,8 @@
                 sciCount: 0,
                 ssciCount: 0,
                 dbVersion: '-',
-                source: 'INIT'
+                source: 'INIT',
+                displayCount: 0
             });
             
             const [isFileLoaded, setIsFileLoaded] = useState(false);
@@ -243,6 +268,7 @@
                 return 'Unknown';
             };
 
+            // Initialize Worker
             useEffect(() => {
                 const version = extractVersionFromUrl(TARGET_FILE);
                 setStats(prev => ({ ...prev, dbVersion: version }));
@@ -251,29 +277,33 @@
                 workerRef.current = new Worker(URL.createObjectURL(blob));
 
                 workerRef.current.onmessage = (e) => {
-                    const { success, rows, error } = e.data;
-                    if (success) {
-                        const sortedRows = rows.sort((a, b) => a.title.localeCompare(b.title));
-                        setUnifiedData(sortedRows);
-                        setDisplayData(sortedRows);
-                        
-                        const sci = sortedRows.filter(r => r.source && r.source.toUpperCase().includes('SCIE')).length;
-                        const ssci = sortedRows.filter(r => r.source && r.source.toUpperCase().includes('SSCI')).length;
+                    const { success, type, rows, stats: workerStats, totalMatch, error } = e.data;
+                    
+                    if (!success) {
+                        console.error("Worker Error:", error);
+                        setErrorMsg({ text: "Processing Failed: " + error, code: "WORKER_ERR" });
+                        setIsParsing(false);
+                        return;
+                    }
 
+                    if (type === 'READY') {
                         setStats(prev => ({
                             ...prev,
-                            total: sortedRows.length,
-                            sciCount: sci,
-                            ssciCount: ssci
+                            total: workerStats.total,
+                            sciCount: workerStats.sciCount,
+                            ssciCount: workerStats.ssciCount
                         }));
-                        
                         setIsFileLoaded(true);
                         setIsParsing(false);
                         setLoadingStatus('');
-                    } else {
-                        console.error("Worker Error:", error);
-                        setErrorMsg({ text: "Parsing Failed", code: "WORKER_ERR" });
-                        setIsParsing(false);
+                        
+                        // Initial Load of Data (Empty Query)
+                        workerRef.current.postMessage({ type: 'SEARCH', payload: { query: '' } });
+                    }
+                    
+                    if (type === 'SEARCH_RESULTS') {
+                        setDisplayData(rows);
+                        setStats(prev => ({ ...prev, displayCount: totalMatch }));
                     }
                 };
 
@@ -282,24 +312,20 @@
                 };
             }, []);
 
+            // Handle Search Input -> Send to Worker
             useEffect(() => {
                 const timer = setTimeout(() => {
                     setDebouncedTerm(inputValue);
-                    if (!unifiedData || unifiedData.length === 0) return;
-
-                    if (!inputValue.trim()) {
-                        setDisplayData(unifiedData);
-                    } else {
-                        const query = inputValue.toLowerCase().trim();
-                        const filtered = unifiedData.filter(item => 
-                            (item.title && item.title.toLowerCase().includes(query))
-                        );
-                        setDisplayData(filtered);
+                    if (workerRef.current && isFileLoaded) {
+                        workerRef.current.postMessage({ 
+                            type: 'SEARCH', 
+                            payload: { query: inputValue } 
+                        });
                     }
                 }, 300);
 
                 return () => clearTimeout(timer);
-            }, [inputValue, unifiedData]);
+            }, [inputValue, isFileLoaded]);
 
             useEffect(() => {
                 if (!isFileLoaded) {
@@ -309,11 +335,10 @@
 
             // === Direct File Loading with Cache Busting & Transferable Objects ===
             const loadTargetFile = async () => {
-                // Check if running in local file mode (file:// protocol)
                 if (window.location.protocol === 'file:') {
                     setLoadingStatus('');
                     setErrorMsg({ 
-                        text: "Local Mode Detected: Please use the 'Manual Upload' button to load the file due to browser security restrictions.", 
+                        text: "Local Mode: Browsers block auto-loading. Please use 'Manual Upload'.", 
                         code: "LOCAL_MODE_RESTRICTION" 
                     });
                     return;
@@ -324,48 +349,33 @@
                 setErrorMsg(null);
 
                 try {
-                    // 1. Cache Busting: Add timestamp AND Headers to force new fetch
-                    // This fixes the "must clear history" issue on mobile
                     const cacheBuster = `?t=${new Date().getTime()}`;
                     const fileUrl = `./${TARGET_FILE}${cacheBuster}`;
                     
                     const response = await fetch(fileUrl, {
-                        cache: 'no-store', // Force network
-                        headers: {
-                            'Pragma': 'no-cache',
-                            'Cache-Control': 'no-cache'
-                        }
+                        cache: 'no-store',
+                        headers: { 'Pragma': 'no-cache', 'Cache-Control': 'no-cache' }
                     });
                     
-                    if (!response.ok) {
-                        if (response.status === 404) {
-                            throw new Error(`File '${TARGET_FILE}' not found in the same directory.`);
-                        }
-                        throw new Error(`Download Failed: ${response.status}`);
-                    }
+                    if (!response.ok) throw new Error(response.status === 404 ? 'File not found' : 'Download Failed');
 
                     const buffer = await response.arrayBuffer();
                     
-                    setStats(prev => ({ 
-                        ...prev, 
-                        source: 'LOCAL_FILE', 
-                    }));
+                    setStats(prev => ({ ...prev, source: 'LOCAL_FILE' }));
+                    setLoadingStatus('Processing data in background...');
                     
-                    // 2. Transferable Object: Pass buffer to worker without cloning
-                    // This fixes the "crash/reload" issue on mobile (memory pressure)
                     if (workerRef.current) {
+                        // Use Transferable Objects to move memory ownership to worker (Critical for iOS OOM)
                         workerRef.current.postMessage({ 
                             type: 'PARSE_SINGLE_JCR', 
                             payload: { data: buffer }
-                        }, [buffer]); // <-- Transfer ownership of buffer here
+                        }, [buffer]); 
                     }
 
                 } catch (error) {
                     console.warn("Load error:", error);
                     let userMsg = error.message;
-                    if (userMsg.includes("Failed to fetch") || userMsg.includes("NetworkError")) {
-                        userMsg = "Network Error. Please ensure the file exists and GitHub Pages is deployed correctly.";
-                    }
+                    if (userMsg.includes("Failed to fetch")) userMsg = "Network Error. Check GitHub Pages deployment.";
                     setErrorMsg({ text: userMsg, code: "FILE_NOT_FOUND" });
                     setIsParsing(false);
                 }
@@ -391,7 +401,6 @@
                 reader.onload = (event) => {
                     const buffer = event.target.result;
                     if (workerRef.current) {
-                        // Also use transferable here for manual upload
                         workerRef.current.postMessage({ 
                             type: 'PARSE_SINGLE_JCR', 
                             payload: { data: buffer }
@@ -466,7 +475,7 @@
                             <h1 className="text-2xl font-bold">JCR Journal Search Report</h1>
                             <div className="flex justify-between mt-2 text-sm">
                                 <span>Keywords: {inputValue || "(All Records)"}</span>
-                                <span>Total {displayData.length.toLocaleString()} records</span>
+                                <span>Total {stats.displayCount.toLocaleString()} records</span>
                                 <span>Database version: {stats.dbVersion}</span>
                             </div>
                         </div>
@@ -497,7 +506,7 @@
                         {isFileLoaded && (
                             <VirtualTable 
                                 data={displayData} 
-                                totalCount={stats.total}
+                                totalCount={stats.displayCount}
                                 isPrinting={isPrinting} 
                                 inputValue={inputValue}
                                 dbVersion={stats.dbVersion}
@@ -626,7 +635,7 @@
                     </div>
                     
                     <div className="bg-slate-50 text-slate-400 text-[10px] py-2 px-6 border-t border-slate-200 text-center shrink-0 print:hidden">
-                        Total {data.length.toLocaleString()} records displayed (from {totalCount.toLocaleString()} total entries). Database version: {dbVersion}
+                        Total {totalCount.toLocaleString()} records displayed (from {totalCount.toLocaleString()} total entries). Database version: {dbVersion}
                     </div>
                 </div>
             );
