@@ -307,7 +307,7 @@
                 }
             }, []);
 
-            // === Direct File Loading with Cache Busting ===
+            // === Direct File Loading with Cache Busting & Transferable Objects ===
             const loadTargetFile = async () => {
                 // Check if running in local file mode (file:// protocol)
                 if (window.location.protocol === 'file:') {
@@ -324,11 +324,18 @@
                 setErrorMsg(null);
 
                 try {
-                    // Cache Busting: Add timestamp to force new fetch
+                    // 1. Cache Busting: Add timestamp AND Headers to force new fetch
+                    // This fixes the "must clear history" issue on mobile
                     const cacheBuster = `?t=${new Date().getTime()}`;
                     const fileUrl = `./${TARGET_FILE}${cacheBuster}`;
                     
-                    const response = await fetch(fileUrl);
+                    const response = await fetch(fileUrl, {
+                        cache: 'no-store', // Force network
+                        headers: {
+                            'Pragma': 'no-cache',
+                            'Cache-Control': 'no-cache'
+                        }
+                    });
                     
                     if (!response.ok) {
                         if (response.status === 404) {
@@ -344,11 +351,13 @@
                         source: 'LOCAL_FILE', 
                     }));
                     
+                    // 2. Transferable Object: Pass buffer to worker without cloning
+                    // This fixes the "crash/reload" issue on mobile (memory pressure)
                     if (workerRef.current) {
                         workerRef.current.postMessage({ 
                             type: 'PARSE_SINGLE_JCR', 
-                            payload: { data: new Uint8Array(buffer) }
-                        });
+                            payload: { data: buffer }
+                        }, [buffer]); // <-- Transfer ownership of buffer here
                     }
 
                 } catch (error) {
@@ -380,11 +389,13 @@
 
                 const reader = new FileReader();
                 reader.onload = (event) => {
+                    const buffer = event.target.result;
                     if (workerRef.current) {
+                        // Also use transferable here for manual upload
                         workerRef.current.postMessage({ 
                             type: 'PARSE_SINGLE_JCR', 
-                            payload: { data: new Uint8Array(event.target.result) }
-                        });
+                            payload: { data: buffer }
+                        }, [buffer]); 
                     }
                 };
                 reader.readAsArrayBuffer(file);
